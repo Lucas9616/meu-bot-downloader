@@ -1,63 +1,99 @@
-import logging
+import telebot
+import requests
+import json
+import hashlib
+import time
 import os
-import re
-import yt_dlp
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+import random
+from flask import Flask
+from threading import Thread
 
-# Configuração de logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# --- SERVIDOR PARA O RENDER NÃO DESLIGAR ---
+app = Flask('')
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💰 **Seu Assistente de Vendas Shopee está ON!**\n\n"
-        "1. Gere seu link de afiliado no App da Shopee.\n"
-        "2. Cole o link aqui.\n"
-        "3. Eu baixo o vídeo e monto o post pronto para o seu canal! 🚀"
-    )
+@app.route('/')
+def home():
+    return "Robô Shopee VIP Online! 🚀💰"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    urls = re.findall(r'(https?://\S+)', text)
-    if not urls: return
-    url = urls[0]
+def run_server():
+    # O Render exige que o servidor rode na porta definida pela variável de ambiente PORT
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-    status_message = await update.message.reply_text("🎬 Baixando vídeo do produto... Aguarde.")
+def keep_alive():
+    t = Thread(target=run_server)
+    t.start()
+
+# --- CONFIGURAÇÕES DO ROBÔ ---
+TOKEN = "8450495026:AAFsdEmkkRRJAW-Fp8QqtGlQZ16eSrq4WG4"
+APP_ID = "18384670408"
+SECRET = "Z3UIVKU5Q2PJHSFMFIZFD2G6LDJG2EBG"
+CHAT_ID = "-1003777686760"
+API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
+
+bot = telebot.TeleBot(TOKEN)
+produtos_postados = []
+
+def get_signature(payload, timestamp):
+    sign_str = f"{APP_ID}{timestamp}{payload}{SECRET}"
+    return hashlib.sha256(sign_str.encode("utf-8")).hexdigest()
+
+def buscar_e_postar_ofertas():
+    global produtos_postados
+    palavras = ["fone bluetooth", "relogio masculino", "utilidades cozinha", "maquiagem", "eletronicos", "moda feminina", "acessorios celular", "brinquedos", "decoracao casa", "ferramentas", "pet shop"]
+    random.shuffle(palavras) 
+    contador_de_posts = 0
     
-    try:
-        ydl_opts = {
-            'format': 'best',
-            'outtmpl': 'downloads/%(id)s.%(ext)s',
-            'quiet': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        }
+    for termo in palavras:
+        print(f"🔎 Buscando: {termo}...")
+        timestamp = int(time.time())
+        query = f'{{productOfferV2(keyword: "{termo}", limit: 10){{nodes{{productName,imageUrl,priceMin,productLink}}}}}}'
+        payload = json.dumps({"query": query}, separators=(",", ":"))
+        sig = get_signature(payload, timestamp)
+        headers = {"Authorization": f"SHA256 Credential={APP_ID}, Timestamp={timestamp}, Signature={sig}", "Content-Type": "application/json"}
         
-        loop = asyncio.get_event_loop()
-        file_path = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).prepare_filename(yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True)))
-            
-        if os.path.exists(file_path):
-            # Botão com o SEU link de afiliado que você enviou
-            keyboard = [[InlineKeyboardButton("🛒 COMPRAR AGORA", url=url)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            r = requests.post(API_URL, headers=headers, data=payload).json()
+            produtos = r.get("data", {}).get("productOfferV2", {}).get("nodes", [])
+            if not produtos: continue
 
-            with open(file_path, 'rb') as video_file:
-                await update.message.reply_video(
-                    video=video_file, 
-                    caption=f"🛍️ **ACHADINHO DO DIA!**\n\n✨ Olha que incrível esse produto que encontrei!\n\n🚚 Frete Grátis disponível!\n\n👇 **CLIQUE NO LINK ABAIXO PARA COMPRAR:**\n{url}",
-                    reply_markup=reply_markup
-                )
-            os.remove(file_path)
-            await status_message.delete()
+            postou_neste_termo = False
+            for p in produtos:
+                if postou_neste_termo: break
+                nome_produto = p['productName']
+                if nome_produto in produtos_postados: continue
+                
+                ts_l = int(time.time())
+                url_original = p['productLink'].split('?')[0]
+                q_l = 'mutation{generateShortLink(input:{originUrl:"%s"}){shortLink}}' % url_original
+                p_l = json.dumps({"query": q_l}, separators=(',', ':'))
+                sig_l = get_signature(p_l, ts_l)
+                h_l = {"Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts_l}, Signature={sig_l}", "Content-Type": "application/json"}
+                
+                r_l = requests.post(API_URL, headers=h_l, data=p_l).json()
+                link_final = r_l.get("data", {}).get("generateShortLink", {}).get("shortLink")
+
+                if link_final and ("shope.ee" in link_final or "s.shopee" in link_final):
+                    msg = (f"🎁 *NOVIDADE COM DESCONTO NO CANAL!* 🎁\n\n📦 *{p['productName'][:100]}...*\n\n✅ *POR APENAS: R$ {float(p['priceMin']):.2f}*\n\n🔥 *PROMOÇÃO EXCLUSIVA:* \n👉 [CLIQUE AQUI E CONFIRA]({link_final})\n\n🏃‍♂️💨 *APROVEITE:* O estoque é limitado! ✨")
+                    bot.send_photo(CHAT_ID, p['imageUrl'], caption=msg, parse_mode="Markdown")
+                    print(f"✅ Postado: '{termo}'")
+                    produtos_postados.append(nome_produto)
+                    if len(produtos_postados) > 50: produtos_postados.pop(0)
+                    postou_neste_termo = True
+                    contador_de_posts += 1
+                    if contador_de_posts % 2 == 0:
+                        time.sleep(60) 
+                    else:
+                        time.sleep(10) 
+        except Exception as e:
+            print(f"❌ Erro em '{termo}': {e}")
+
+# --- INÍCIO ---
+if __name__ == "__main__":
+    keep_alive() # Inicia o servidor para o Render
+    print("🚀 Robô VIP v25 (RENDER 24H) Online!")
+    while True:
+        buscar_e_postar_ofertas()
+        print("☕ Ciclo concluído. Aguardando 3 minutos...")
+        time.sleep(180)
         
-    except Exception as e:
-        await status_message.edit_text("❌ Erro ao baixar o vídeo. Tente enviar o link novamente.")
-
-if __name__ == '__main__':
-    TOKEN = "8296337973:AAFzThCZX4A7bj9BKFtSwd0cZpglOUl2PKY"
-    os.makedirs("downloads", exist_ok=True)
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.run_polling()
-    
